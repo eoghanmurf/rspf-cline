@@ -13,7 +13,7 @@ import { HostProvider } from "@/hosts/host-provider"
 import * as posthogConfigModule from "@/shared/services/config/posthog-config"
 import { setVscodeHostProviderMock } from "@/test/host-provider-test-utils"
 import { NoOpTelemetryProvider, TelemetryProviderFactory } from "./TelemetryProviderFactory"
-import { TelemetryService } from "./TelemetryService"
+import { TelemetryMetadata, TelemetryService } from "./TelemetryService"
 
 describe("Telemetry system is abstracted and can easily switch between providers", () => {
 	// Setup and teardown for HostProvider mocking
@@ -27,13 +27,14 @@ describe("Telemetry system is abstracted and can easily switch between providers
 	})
 	const MOCK_USER_INFO = {
 		id: "test-user-123",
-		email: "test@example.com",
 		displayName: "Test User",
+		email: "test@example.com",
 		createdAt: new Date().toISOString(),
 		organizations: [],
 	}
-	const MOCK_METADATA = {
+	const MOCK_METADATA: TelemetryMetadata = {
 		extension_version: "1.2.3",
+		cline_type: "cline-unit-test",
 		platform: "Test-IDE",
 		platform_version: "9.8.7-abc",
 		os_type: "win32",
@@ -403,6 +404,41 @@ describe("Telemetry system is abstracted and can easily switch between providers
 			// Test that events are captured for execution
 			telemetryService.captureSubagentExecution("task-789", 2000, 10, true)
 			assert.ok(logSpy.calledOnce, "Execution event should be captured when category is enabled")
+
+			logSpy.restore()
+			await noOpProvider.dispose()
+		})
+	})
+
+	describe("Skills Telemetry", () => {
+		it("should capture skill used events correctly", async () => {
+			const noOpProvider = new NoOpTelemetryProvider()
+			const logSpy = sinon.spy(noOpProvider, "log")
+			const telemetryService = new TelemetryService([noOpProvider], MOCK_METADATA)
+
+			logSpy.resetHistory()
+
+			telemetryService.captureSkillUsed({
+				ulid: "task-123",
+				skillName: "my-skill",
+				skillSource: "global",
+				skillsAvailableGlobal: 2,
+				skillsAvailableProject: 3,
+				provider: "cline",
+				modelId: "anthropic/claude-sonnet-4.5",
+			})
+
+			assert.ok(logSpy.calledOnce, "Log should be called once")
+			const [eventName, properties] = logSpy.firstCall.args
+			assert.strictEqual(eventName, "task.skill_used", "Event name should be task.skill_used")
+			assert.ok(properties, "Properties should be defined")
+			assert.strictEqual(properties.ulid, "task-123", "Properties should include task ULID")
+			assert.strictEqual(properties.skillName, "my-skill", "Properties should include skillName")
+			assert.strictEqual(properties.skillSource, "global", "Properties should include skillSource")
+			assert.strictEqual(properties.skillsAvailableGlobal, 2, "Properties should include global skill count")
+			assert.strictEqual(properties.skillsAvailableProject, 3, "Properties should include project skill count")
+			assert.strictEqual(properties.provider, "cline", "Properties should include provider")
+			assert.strictEqual(properties.modelId, "anthropic/claude-sonnet-4.5", "Properties should include modelId")
 
 			logSpy.restore()
 			await noOpProvider.dispose()

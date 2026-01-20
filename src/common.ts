@@ -2,6 +2,7 @@ import * as vscode from "vscode"
 import {
 	cleanupMcpMarketplaceCatalogFromGlobalState,
 	migrateCustomInstructionsToGlobalRules,
+	migrateHooksEnabledToBoolean,
 	migrateTaskHistoryToFile,
 	migrateWelcomeViewCompleted,
 	migrateWorkspaceToGlobalStorage,
@@ -18,11 +19,15 @@ import { BannerService } from "./services/banner/BannerService"
 import { audioRecordingService } from "./services/dictation/AudioRecordingService"
 import { ErrorService } from "./services/error"
 import { featureFlagsService } from "./services/feature-flags"
-import { initializeDistinctId } from "./services/logging/distinctId"
+import { getDistinctId, initializeDistinctId } from "./services/logging/distinctId"
 import { telemetryService } from "./services/telemetry"
 import { PostHogClientProvider } from "./services/telemetry/providers/posthog/PostHogClientProvider"
 import { ShowMessageType } from "./shared/proto/host/window"
+import { syncWorker } from "./shared/services/worker/sync"
+import { getBlobStoreSettingsFromEnv } from "./shared/services/worker/worker"
 import { getLatestAnnouncementId } from "./utils/announcements"
+import { openAiCodexOAuthManager } from "./integrations/openai-codex/oauth"
+import { arePathsEqual } from "./utils/path"
 /**
  * Performs intialization for Cline that is common to all platforms.
  *
@@ -40,6 +45,9 @@ export async function initialize(context: vscode.ExtensionContext): Promise<Webv
 		})
 	}
 
+	// Initialize OpenAI Codex OAuth manager with extension context for secrets storage
+	openAiCodexOAuthManager.initialize(context)
+
 	// Set the distinct ID for logging and telemetry
 	await initializeDistinctId(context)
 
@@ -48,7 +56,7 @@ export async function initialize(context: vscode.ExtensionContext): Promise<Webv
 
 	// Setup the external services
 	await ErrorService.initialize()
-	await featureFlagsService.poll()
+	await featureFlagsService.poll(null)
 
 	// Migrate custom instructions to global Cline rules (one-time cleanup)
 	await migrateCustomInstructionsToGlobalRules(context)
@@ -62,6 +70,9 @@ export async function initialize(context: vscode.ExtensionContext): Promise<Webv
 	// Ensure taskHistory.json exists and migrate legacy state (runs once)
 	await migrateTaskHistoryToFile(context)
 
+	// Migrate hooksEnabled from ClineFeatureSetting to boolean (one-time cleanup)
+	await migrateHooksEnabledToBoolean(context)
+
 	// Clean up MCP marketplace catalog from global state (moved to disk cache)
 	await cleanupMcpMarketplaceCatalogFromGlobalState(context)
 
@@ -72,21 +83,18 @@ export async function initialize(context: vscode.ExtensionContext): Promise<Webv
 
 	await showVersionUpdateAnnouncement(context)
 
-	// Initialize banner service
+	// Check if this workspace was opened from worktree quick launch
+	await checkWorktreeAutoOpen(context)
+
+	// Initialize banner service (TEMPORARILY DISABLED - not fetching banners to prevent API hammering)
 	BannerService.initialize(webview.controller)
-	BannerService.get()
-		.fetchActiveBanners()
-		.then((banners) => {
-			if (banners.length > 0) {
-				Logger.log(`BannerService: ${banners.length} active banner(s) fetched.`)
-				// Banners are now cached and can be accessed by the frontend when needed
-			}
-		})
-		.catch((error) => {
-			Logger.error("BannerService: Failed to fetch banners on startup", error)
-		})
+	// DISABLED: .getActiveBanners(true)
 
 	telemetryService.captureExtensionActivated()
+
+	// Use remote config blobStoreConfig if available, otherwise fall back to env vars
+	const blobStoreSettings = StateManager.get().getRemoteConfigSettings()?.blobStoreConfig ?? getBlobStoreSettingsFromEnv()
+	syncWorker().init({ ...blobStoreSettings, userDistinctId: getDistinctId() })
 
 	return webview
 }
@@ -100,17 +108,15 @@ async function showVersionUpdateAnnouncement(context: vscode.ExtensionContext) {
 		if (!previousVersion || currentVersion !== previousVersion) {
 			Logger.log(`Cline version changed: ${previousVersion} -> ${currentVersion}. First run or update detected.`)
 
-			// Use the same condition as announcements: focus when there's a new announcement to show
+			// Check if there's a new announcement to show
 			const lastShownAnnouncementId = context.globalState.get<string>("lastShownAnnouncementId")
 			const latestAnnouncementId = getLatestAnnouncementId()
 
 			if (lastShownAnnouncementId !== latestAnnouncementId) {
-				// Focus Cline when there's a new announcement to show (major/minor updates or fresh installs)
+				// Show notification when there's a new announcement (major/minor updates or fresh installs)
 				const message = previousVersion
 					? `Cline has been updated to v${currentVersion}`
 					: `Welcome to Cline v${currentVersion}`
-				await HostProvider.workspace.openClineSidebarPanel({})
-				await new Promise((resolve) => setTimeout(resolve, 200))
 				HostProvider.window.showMessage({
 					type: ShowMessageType.INFORMATION,
 					message,
@@ -122,6 +128,39 @@ async function showVersionUpdateAnnouncement(context: vscode.ExtensionContext) {
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error)
 		console.error(`Error during post-update actions: ${errorMessage}, Stack trace: ${error.stack}`)
+	}
+}
+
+/**
+ * Checks if this workspace was opened from the worktree quick launch button.
+ * If so, opens the Cline sidebar and clears the state.
+ */
+async function checkWorktreeAutoOpen(context: vscode.ExtensionContext): Promise<void> {
+	try {
+		// Read directly from globalState (not StateManager cache) since this may have been
+		// set by another window right before this one opened
+		const worktreeAutoOpenPath = context.globalState.get<string>("worktreeAutoOpenPath")
+		if (!worktreeAutoOpenPath) {
+			return
+		}
+
+		// Get current workspace path
+		const workspacePaths = (await HostProvider.workspace.getWorkspacePaths({})).paths
+		if (workspacePaths.length === 0) {
+			return
+		}
+
+		const currentPath = workspacePaths[0]
+
+		// Check if current workspace matches the worktree path
+		if (arePathsEqual(currentPath, worktreeAutoOpenPath)) {
+			// Clear the state first to prevent re-triggering
+			await context.globalState.update("worktreeAutoOpenPath", undefined)
+			// Open the Cline sidebar
+			await HostProvider.workspace.openClineSidebarPanel({})
+		}
+	} catch (error) {
+		Logger.error("Error checking worktree auto-open", error)
 	}
 }
 
@@ -138,4 +177,5 @@ export async function tearDown(): Promise<void> {
 	featureFlagsService.dispose()
 	// Dispose all webview instances
 	await WebviewProvider.disposeAllInstances()
+	syncWorker().dispose()
 }

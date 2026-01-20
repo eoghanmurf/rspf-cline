@@ -1,4 +1,3 @@
-import { Anthropic } from "@anthropic-ai/sdk"
 import {
 	InternationalQwenModelId,
 	internationalQwenDefaultModelId,
@@ -11,6 +10,7 @@ import {
 } from "@shared/api"
 import OpenAI from "openai"
 import type { ChatCompletionTool as OpenAITool } from "openai/resources/chat/completions"
+import { ClineStorageMessage } from "@/shared/messages/content"
 import { fetch } from "@/shared/net"
 import { ApiHandler, CommonApiHandlerOptions } from "../"
 import { withRetry } from "../retry"
@@ -81,7 +81,7 @@ export class QwenHandler implements ApiHandler {
 	}
 
 	@withRetry()
-	async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[], tools?: OpenAITool[]): ApiStream {
+	async *createMessage(systemPrompt: string, messages: ClineStorageMessage[], tools?: OpenAITool[]): ApiStream {
 		const client = this.ensureClient()
 		const model = this.getModel()
 		const isDeepseekReasoner = model.id.includes("deepseek-r1")
@@ -122,7 +122,7 @@ export class QwenHandler implements ApiHandler {
 		const toolCallProcessor = new ToolCallProcessor()
 
 		for await (const chunk of stream) {
-			const delta = chunk.choices[0]?.delta
+			const delta = chunk.choices?.[0]?.delta
 			if (delta?.content) {
 				yield {
 					type: "text",

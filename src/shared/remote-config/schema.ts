@@ -33,6 +33,7 @@ export const OpenAiCompatibleSchema = z.object({
 	openAiBaseUrl: z.string().optional(),
 	openAiHeaders: z.record(z.string(), z.string()).optional(),
 	azureApiVersion: z.string().optional(),
+	azureIdentity: z.boolean().optional(),
 })
 
 // AWS Bedrock model schema with per-model settings
@@ -87,6 +88,17 @@ export const VertexSettingsSchema = z.object({
 	vertexRegion: z.string().optional(),
 })
 
+export const LiteLLMModelSchema = z.object({
+	id: z.string(),
+	thinkingBudgetTokens: z.number().optional(),
+	promptCachingEnabled: z.boolean().optional(),
+})
+
+export const LiteLLMSchema = z.object({
+	models: z.array(LiteLLMModelSchema).optional(),
+	baseUrl: z.string().optional(),
+})
+
 // Provider settings schema
 // Each provider becomes an optional field
 const ProviderSettingsSchema = z.object({
@@ -94,11 +106,21 @@ const ProviderSettingsSchema = z.object({
 	AwsBedrock: AwsBedrockSettingsSchema.optional(),
 	Cline: ClineSettingsSchema.optional(),
 	Vertex: VertexSettingsSchema.optional(),
+	LiteLLM: LiteLLMSchema.optional(),
 })
 
 export const AllowedMCPServerSchema = z.object({
 	// The ID of the MCP is the URL for their github repo.
 	id: z.string(),
+})
+
+export const RemoteMCPServerSchema = z.object({
+	// The name of the MCP server
+	name: z.string(),
+	// The URL of the MCP server
+	url: z.string(),
+	// When this is true, the user cannot disable this MCP server
+	alwaysEnabled: z.boolean().optional(),
 })
 
 // Settings for a global cline rules or workflow file.
@@ -109,6 +131,31 @@ export const GlobalInstructionsFileSchema = z.object({
 	name: z.string(),
 	// The contents of the rules or workflow file
 	contents: z.string(),
+})
+
+export const S3AccessKeySettingsSchema = z.object({
+	bucket: z.string(),
+	accessKeyId: z.string(),
+	secretAccessKey: z.string(),
+	region: z.string().optional(),
+	endpoint: z.string().optional(),
+	accountId: z.string().optional(),
+	intervalMs: z.number().optional(),
+	maxRetries: z.number().optional(),
+	batchSize: z.number().optional(),
+	maxQueueSize: z.number().optional(),
+	maxFailedAgeMs: z.number().optional(),
+	backfillEnabled: z.boolean().optional(),
+})
+
+export const PromptUploadingSchema = z.object({
+	enabled: z.boolean().optional(),
+	type: z.literal("s3_access_keys").optional(),
+	s3AccessSettings: S3AccessKeySettingsSchema.optional(),
+})
+
+export const EnterpriseTelemetrySchema = z.object({
+	promptUploading: PromptUploadingSchema.optional(),
 })
 
 export const RemoteConfigSchema = z.object({
@@ -123,8 +170,16 @@ export const RemoteConfigSchema = z.object({
 	telemetryEnabled: z.boolean().optional(),
 
 	// MCP settings
+	// If this is false, the MCP marketplace is disabled in the extension
 	mcpMarketplaceEnabled: z.boolean().optional(),
+
+	// If this is configured, the users only have access to these allowlisted MCP servers in the marketplace.
 	allowedMCPServers: z.array(AllowedMCPServerSchema).optional(),
+
+	// A list of pre-configured remote MCP servers.
+	remoteMCPServers: z.array(RemoteMCPServerSchema).optional(),
+	// If this is true, users cannot use or configure MCP servers that are not remotely configured.
+	blockPersonalRemoteMCPServers: z.boolean().optional(),
 
 	// If the user is allowed to enable YOLO mode. Note this is different from the extension setting
 	// yoloModeEnabled, because we do not want to force YOLO enabled for the user.
@@ -147,18 +202,38 @@ export const RemoteConfigSchema = z.object({
 	openTelemetryLogBatchTimeout: z.number().optional(),
 	openTelemetryLogMaxQueueSize: z.number().optional(),
 
+	enterpriseTelemetry: EnterpriseTelemetrySchema.optional(),
+
 	// Rules & Workflows
 	globalRules: z.array(GlobalInstructionsFileSchema).optional(),
 	globalWorkflows: z.array(GlobalInstructionsFileSchema).optional(),
 })
 
+export const APIKeySchema = z.record(z.string(), z.string())
+
 // Type inference from schemas
+export type RemoteConfig = z.infer<typeof RemoteConfigSchema>
 export type MCPServer = z.infer<typeof AllowedMCPServerSchema>
-export type OpenAiCompatibleModel = z.infer<typeof OpenAiCompatibleModelSchema>
+export type RemoteMCPServer = z.infer<typeof RemoteMCPServerSchema>
+export type GlobalInstructionsFile = z.infer<typeof GlobalInstructionsFileSchema>
+
+export type ProviderSettings = z.infer<typeof ProviderSettingsSchema>
+
 export type OpenAiCompatible = z.infer<typeof OpenAiCompatibleSchema>
+export type OpenAiCompatibleModel = z.infer<typeof OpenAiCompatibleModelSchema>
+
+export type AwsBedrockSettings = z.infer<typeof AwsBedrockSettingsSchema>
 export type AwsBedrockModel = z.infer<typeof AwsBedrockModelSchema>
 export type AwsBedrockCustomModel = z.infer<typeof AwsBedrockCustomModelSchema>
-export type AwsBedrockSettings = z.infer<typeof AwsBedrockSettingsSchema>
-export type ProviderSettings = z.infer<typeof ProviderSettingsSchema>
-export type RemoteConfig = z.infer<typeof RemoteConfigSchema>
-export type GlobalInstructionsFile = z.infer<typeof GlobalInstructionsFileSchema>
+
+export type VertexSettings = z.infer<typeof VertexSettingsSchema>
+export type VertexModel = z.infer<typeof VertexModelSchema>
+
+export type LiteLLMSettings = z.infer<typeof LiteLLMSchema>
+export type LiteLLMModel = z.infer<typeof LiteLLMModelSchema>
+
+export type APIKeySettings = z.infer<typeof APIKeySchema>
+
+export type EnterpriseTelemetry = z.infer<typeof EnterpriseTelemetrySchema>
+export type PromptUploading = z.infer<typeof PromptUploadingSchema>
+export type S3AccessKeySettings = z.infer<typeof S3AccessKeySettingsSchema>

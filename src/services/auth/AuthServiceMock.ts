@@ -1,12 +1,13 @@
 import { String } from "@shared/proto/cline/common"
 import { ClineEnv } from "@/config"
 import { Controller } from "@/core/controller"
+import { setWelcomeViewCompleted } from "@/core/controller/state/setWelcomeViewCompleted"
 import { WebviewProvider } from "@/core/webview"
 import { CLINE_API_ENDPOINT } from "@/shared/cline/api"
 import { fetch } from "@/shared/net"
+import { buildBasicClineHeaders } from "../EnvUtils"
 import { AuthService } from "./AuthService"
 
-// TODO: Consider adding a mock auth provider implementing IAuthProvider for more realistic testing
 export class AuthServiceMock extends AuthService {
 	protected constructor(controller: Controller) {
 		super(controller)
@@ -15,9 +16,6 @@ export class AuthServiceMock extends AuthService {
 			throw new Error("AuthServiceMock should only be used in local environment for testing purposes.")
 		}
 
-		// Support both auth providers, default to firebase for compatibility
-		const authProvider = process.env.E2E_TEST_AUTH_PROVIDER || "firebase"
-		this._setProvider(authProvider)
 		this._controller = controller
 	}
 
@@ -65,6 +63,7 @@ export class AuthServiceMock extends AuthService {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
+					...(await buildBasicClineHeaders()),
 				},
 				body: JSON.stringify({
 					code: testCode,
@@ -122,6 +121,7 @@ export class AuthServiceMock extends AuthService {
 	override async handleAuthCallback(_token: string, _provider: string): Promise<void> {
 		try {
 			this._authenticated = true
+			await setWelcomeViewCompleted(this._controller, { value: true })
 			await this.sendAuthStatusUpdate()
 		} catch (error) {
 			console.error("Error signing in with custom token:", error)

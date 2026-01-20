@@ -1,8 +1,8 @@
-import { Anthropic } from "@anthropic-ai/sdk"
 import { ModelInfo, requestyDefaultModelId, requestyDefaultModelInfo } from "@shared/api"
 import { calculateApiCostOpenAI } from "@utils/cost"
 import OpenAI from "openai"
 import { toRequestyServiceStringUrl } from "@/shared/clients/requesty"
+import { ClineStorageMessage } from "@/shared/messages/content"
 import { fetch } from "@/shared/net"
 import { ApiHandler, CommonApiHandlerOptions } from "../index"
 import { withRetry } from "../retry"
@@ -59,7 +59,7 @@ export class RequestyHandler implements ApiHandler {
 	}
 
 	@withRetry()
-	async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[]): ApiStream {
+	async *createMessage(systemPrompt: string, messages: ClineStorageMessage[]): ApiStream {
 		const client = this.ensureClient()
 		const model = this.getModel()
 
@@ -99,7 +99,7 @@ export class RequestyHandler implements ApiHandler {
 		let lastUsage: any
 
 		for await (const chunk of stream) {
-			const delta = chunk.choices[0]?.delta
+			const delta = chunk.choices?.[0]?.delta
 			if (delta?.content) {
 				yield {
 					type: "text",

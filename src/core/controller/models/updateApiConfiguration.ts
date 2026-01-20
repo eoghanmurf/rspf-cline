@@ -1,8 +1,9 @@
 import { Empty } from "@shared/proto/cline/common"
 import { convertProtoToApiProvider } from "@shared/proto-conversions/models/api-configuration-conversion"
 import { buildApiHandler } from "@/core/api"
-import { ApiHandlerOptions, ApiHandlerSecrets, ApiProvider } from "@/shared/api"
+import { ApiHandlerOptions, ApiProvider } from "@/shared/api"
 import { UpdateApiConfigurationRequestNew } from "@/shared/proto/index.cline"
+import { Secrets } from "@/shared/storage/state-keys"
 import type { Controller } from "../index"
 
 /**
@@ -32,6 +33,20 @@ function parseFieldMask(updateMask: string[]): {
 }
 
 /**
+ * Gets the alternate mode field name (e.g., planModeX <-> actModeX)
+ * @param fieldName The field name to get alternate for
+ * @returns The alternate mode field name or null if not a mode-specific field
+ */
+function getAlternateModeField(fieldName: string): string | null {
+	if (fieldName.startsWith("planMode")) {
+		return fieldName.replace("planMode", "actMode")
+	} else if (fieldName.startsWith("actMode")) {
+		return fieldName.replace("actMode", "planMode")
+	}
+	return null
+}
+
+/**
  * Updates API configuration using field mask
  * @param controller The controller instance
  * @param request The update API configuration request with field mask
@@ -39,9 +54,9 @@ function parseFieldMask(updateMask: string[]): {
  */
 export async function updateApiConfiguration(controller: Controller, request: UpdateApiConfigurationRequestNew): Promise<Empty> {
 	try {
-		const { apiConfiguration, updateMask } = request
+		const { updates, updateMask } = request
 
-		if (!apiConfiguration) {
+		if (!updates) {
 			throw new Error("API configuration is required")
 		}
 
@@ -49,13 +64,13 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 			throw new Error("Update mask is required and must contain at least one path")
 		}
 
-		const { options: protoOptions, secrets: protoSecrets } = apiConfiguration
+		const { options: protoOptions, secrets: protoSecrets } = updates
 
 		// Parse the field mask to determine which fields to update
 		const { options: maskOptionsFields, secrets: maskSecretsFields } = parseFieldMask(updateMask)
 
 		// Process secrets based on field mask
-		const secrets: Partial<ApiHandlerSecrets> = {}
+		const secrets: Partial<Secrets> = {}
 
 		if (protoSecrets && maskSecretsFields.size > 0) {
 			// Validate all masked fields exist
@@ -67,7 +82,7 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 			// Process entries that are in the mask
 			for (const [key, value] of Object.entries(protoSecrets)) {
 				if (maskSecretsFields.has(key)) {
-					secrets[key as keyof ApiHandlerSecrets] = value
+					secrets[key as keyof Secrets] = value
 				}
 			}
 		}
@@ -81,6 +96,10 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 					throw new Error(`Field "${fieldName}" specified in mask but not found in options`)
 				}
 			}
+
+			// Check if mode-specific configurations should be kept separate
+			const separateModeConfigs = controller.stateManager.getGlobalSettingsKey("planActSeparateModelsSetting")
+
 			// Process entries that are in the mask
 			for (const [key, value] of Object.entries(protoOptions)) {
 				if (maskOptionsFields.has(key)) {
@@ -91,6 +110,20 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 						options.actModeApiProvider = convertProtoToApiProvider(value)
 					} else {
 						options[key as keyof ApiHandlerOptions] = value
+					}
+
+					// If mode configs should be synced, also update the alternate mode field
+					if (!separateModeConfigs) {
+						const alternateField = getAlternateModeField(key)
+						if (alternateField) {
+							if (alternateField === "planModeApiProvider") {
+								options.planModeApiProvider = convertProtoToApiProvider(value)
+							} else if (alternateField === "actModeApiProvider") {
+								options.actModeApiProvider = convertProtoToApiProvider(value)
+							} else {
+								options[alternateField as keyof ApiHandlerOptions] = value
+							}
+						}
 					}
 				}
 			}

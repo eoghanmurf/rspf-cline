@@ -1,6 +1,7 @@
 import { findLast } from "@shared/array"
 import { combineApiRequests } from "@shared/combineApiRequests"
 import { combineCommandSequences } from "@shared/combineCommandSequences"
+import { combineErrorRetryMessages } from "@shared/combineErrorRetryMessages"
 import { combineHookSequences } from "@shared/combineHookSequences"
 import type { ClineApiReqInfo, ClineMessage } from "@shared/ExtensionMessage"
 import { getApiMetrics } from "@shared/getApiMetrics"
@@ -20,6 +21,7 @@ import {
 	ChatLayout,
 	convertHtmlToMarkdown,
 	filterVisibleMessages,
+	groupLowStakesTools,
 	groupMessages,
 	InputSection,
 	MessagesArea,
@@ -61,10 +63,9 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 	const task = useMemo(() => messages.at(0), [messages]) // leaving this less safe version here since if the first message is not a task, then the extension is in a bad state and needs to be debugged (see Cline.abort)
 	const modifiedMessages = useMemo(() => {
 		const slicedMessages = messages.slice(1)
-		// Only combine hook sequences if hooks are enabled (both user setting and feature flag)
-		const areHooksEnabled = hooksEnabled?.user && hooksEnabled?.featureFlag
-		const withHooks = areHooksEnabled ? combineHookSequences(slicedMessages) : slicedMessages
-		return combineApiRequests(combineCommandSequences(withHooks))
+		// Only combine hook sequences if hooks are enabled
+		const withHooks = hooksEnabled ? combineHookSequences(slicedMessages) : slicedMessages
+		return combineErrorRetryMessages(combineApiRequests(combineCommandSequences(withHooks)))
 	}, [messages, hooksEnabled])
 	// has to be after api_req_finished are all reduced into api_req_started messages
 	const apiMetrics = useMemo(() => getApiMetrics(modifiedMessages), [modifiedMessages])
@@ -192,10 +193,6 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 	}, [])
 	// Button state is now managed by useButtonState hook
 
-	useEffect(() => {
-		setExpandedRows({})
-	}, [task?.ts])
-
 	// handleFocusChange is already provided by chatState
 
 	// Use message handlers hook
@@ -242,20 +239,27 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 
 	const shouldDisableFilesAndImages = selectedImages.length + selectedFiles.length >= MAX_IMAGES_AND_FILES_PER_MESSAGE
 
-	// Listen for local focusChatInput event
+	// Subscribe to show webview events from the backend
 	useEffect(() => {
-		const handleFocusChatInput = () => {
-			// Only focus chat input box if user is currently viewing the chat (not hidden).
-			if (!isHidden) {
-				textAreaRef.current?.focus()
-			}
-		}
+		const cleanup = UiServiceClient.subscribeToShowWebview(
+			{},
+			{
+				onResponse: (event) => {
+					// Only focus if not hidden and preserveEditorFocus is false
+					if (!isHidden && !event.preserveEditorFocus) {
+						textAreaRef.current?.focus()
+					}
+				},
+				onError: (error) => {
+					console.error("Error in showWebview subscription:", error)
+				},
+				onComplete: () => {
+					console.log("showWebview subscription completed")
+				},
+			},
+		)
 
-		window.addEventListener("focusChatInput", handleFocusChatInput)
-
-		return () => {
-			window.removeEventListener("focusChatInput", handleFocusChatInput)
-		}
+		return cleanup
 	}, [isHidden])
 
 	// Set up addToInput subscription
@@ -324,7 +328,7 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 	}, [modifiedMessages, currentFocusChainChecklist])
 
 	const groupedMessages = useMemo(() => {
-		return groupMessages(visibleMessages)
+		return groupLowStakesTools(groupMessages(visibleMessages))
 	}, [visibleMessages])
 
 	// Use scroll behavior hook
@@ -345,7 +349,6 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 						lastApiReqTotalTokens={lastApiReqTotalTokens}
 						lastProgressMessageText={lastProgressMessageText}
 						messageHandlers={messageHandlers}
-						scrollBehavior={scrollBehavior}
 						selectedModelInfo={{
 							supportsPromptCache: selectedModelInfo.supportsPromptCache,
 							supportsImages: selectedModelInfo.supportsImages || false,

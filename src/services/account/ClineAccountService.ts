@@ -9,12 +9,13 @@ import type {
 import axios, { AxiosRequestConfig, AxiosResponse } from "axios"
 import { ClineEnv } from "@/config"
 import { CLINE_API_ENDPOINT } from "@/shared/cline/api"
+import { getAxiosSettings } from "@/shared/net"
 import { AuthService } from "../auth/AuthService"
+import { buildBasicClineHeaders } from "../EnvUtils"
 
 export class ClineAccountService {
 	private static instance: ClineAccountService
 	private _authService: AuthService
-	private readonly _baseUrl = ClineEnv.config().apiBaseUrl
 
 	constructor() {
 		this._authService = AuthService.getInstance()
@@ -36,7 +37,7 @@ export class ClineAccountService {
 	 * @returns The base URL as a string
 	 */
 	get baseUrl(): string {
-		return this._baseUrl
+		return ClineEnv.config().apiBaseUrl
 	}
 
 	/**
@@ -47,7 +48,7 @@ export class ClineAccountService {
 	 * @throws Error if the API key is not found or the request fails
 	 */
 	private async authenticatedRequest<T>(endpoint: string, config: AxiosRequestConfig = {}): Promise<T> {
-		const url = new URL(endpoint, this._baseUrl).toString() // Validate URL
+		const url = new URL(endpoint, this.baseUrl).toString() // Validate URL
 		// IMPORTANT: Prefixed with 'workos:' so backend can route verification to WorkOS provider
 		const clineAccountAuthToken = await this._authService.getAuthToken()
 		if (!clineAccountAuthToken) {
@@ -58,8 +59,10 @@ export class ClineAccountService {
 			headers: {
 				Authorization: `Bearer ${clineAccountAuthToken}`,
 				"Content-Type": "application/json",
+				...(await buildBasicClineHeaders()),
 				...config.headers,
 			},
+			...getAxiosSettings(),
 		}
 		const response: AxiosResponse<{ data?: T; error: string; success: boolean }> = await axios.request({
 			url,
@@ -89,12 +92,12 @@ export class ClineAccountService {
 	 */
 	async fetchBalanceRPC(): Promise<BalanceResponse | undefined> {
 		try {
-			const me = await this.fetchMe()
-			if (!me || !me.id) {
+			const me = this.getCurrentUser()
+			if (!me || !me.uid) {
 				console.error("Failed to fetch user ID for usage transactions")
 				return undefined
 			}
-			const data = await this.authenticatedRequest<BalanceResponse>(`/api/v1/users/${me.id}/balance`)
+			const data = await this.authenticatedRequest<BalanceResponse>(`/api/v1/users/${me.uid}/balance`)
 			return data
 		} catch (error) {
 			console.error("Failed to fetch balance (RPC):", error)
@@ -108,12 +111,12 @@ export class ClineAccountService {
 	 */
 	async fetchUsageTransactionsRPC(): Promise<UsageTransaction[] | undefined> {
 		try {
-			const me = await this.fetchMe()
-			if (!me || !me.id) {
+			const me = this.getCurrentUser()
+			if (!me || !me.uid) {
 				console.error("Failed to fetch user ID for usage transactions")
 				return undefined
 			}
-			const data = await this.authenticatedRequest<{ items: UsageTransaction[] }>(`/api/v1/users/${me.id}/usages`)
+			const data = await this.authenticatedRequest<{ items: UsageTransaction[] }>(`/api/v1/users/${me.uid}/usages`)
 			return data.items
 		} catch (error) {
 			console.error("Failed to fetch usage transactions (RPC):", error)
@@ -127,13 +130,13 @@ export class ClineAccountService {
 	 */
 	async fetchPaymentTransactionsRPC(): Promise<PaymentTransaction[] | undefined> {
 		try {
-			const me = await this.fetchMe()
-			if (!me || !me.id) {
+			const me = this.getCurrentUser()
+			if (!me || !me.uid) {
 				console.error("Failed to fetch user ID for usage transactions")
 				return undefined
 			}
 			const data = await this.authenticatedRequest<{ paymentTransactions: PaymentTransaction[] }>(
-				`/api/v1/users/${me.id}/payments`,
+				`/api/v1/users/${me.uid}/payments`,
 			)
 			return data.paymentTransactions
 		} catch (error) {
@@ -196,12 +199,12 @@ export class ClineAccountService {
 	 */
 	async fetchOrganizationUsageTransactionsRPC(organizationId: string): Promise<OrganizationUsageTransaction[] | undefined> {
 		try {
-			const me = await this.fetchMe()
-			if (!me || !me.id) {
-				console.error("Failed to fetch user ID for active organization transactions")
+			const organizations = this._authService.getUserOrganizations()
+			if (!organizations) {
+				console.error("Failed to get users organizations")
 				return undefined
 			}
-			const memberId = me.organizations.find((org) => org.organizationId === organizationId)?.memberId
+			const memberId = organizations.find((org) => org.organizationId === organizationId)?.memberId
 			if (!memberId) {
 				console.error("Failed to find member ID for active organization transactions")
 				return undefined
@@ -235,12 +238,15 @@ export class ClineAccountService {
 					organizationId: organizationId || null, // Pass organization if provided
 				},
 			})
+			const activeOrgId = this._authService.getActiveOrganizationId()
+			if (activeOrgId !== organizationId) {
+				// After user switches account, we will force a refresh of the id token by calling this function that restores the refresh token and retrieves new auth info
+				await this._authService.restoreRefreshTokenAndRetrieveAuthInfo()
+			}
 		} catch (error) {
 			console.error("Error switching account:", error)
-			throw error
-		} finally {
-			// After user switches account, we will force a refresh of the id token by calling this function that restores the refresh token and retrieves new auth info
 			await this._authService.restoreRefreshTokenAndRetrieveAuthInfo()
+			throw error
 		}
 	}
 
@@ -260,5 +266,9 @@ export class ClineAccountService {
 		})
 
 		return response
+	}
+
+	private getCurrentUser() {
+		return this._authService.getInfo().user
 	}
 }

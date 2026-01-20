@@ -1,7 +1,8 @@
-import { Anthropic } from "@anthropic-ai/sdk"
 import { ModelInfo, openRouterDefaultModelId, openRouterDefaultModelInfo } from "@shared/api"
+import { shouldSkipReasoningForModel } from "@utils/model-utils"
 import OpenAI from "openai"
 import type { ChatCompletionTool as OpenAITool } from "openai/resources/chat/completions"
+import { ClineStorageMessage } from "@/shared/messages/content"
 import { fetch } from "@/shared/net"
 import { ApiHandler, CommonApiHandlerOptions } from "../index"
 import { withRetry } from "../retry"
@@ -13,7 +14,9 @@ interface VercelAIGatewayHandlerOptions extends CommonApiHandlerOptions {
 	vercelAiGatewayApiKey?: string
 	openRouterModelId?: string
 	openRouterModelInfo?: ModelInfo
+	reasoningEffort?: string
 	thinkingBudgetTokens?: number
+	geminiThinkingLevel?: string
 }
 
 export class VercelAIGatewayHandler implements ApiHandler {
@@ -47,7 +50,7 @@ export class VercelAIGatewayHandler implements ApiHandler {
 	}
 
 	@withRetry()
-	async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[], tools?: OpenAITool[]): ApiStream {
+	async *createMessage(systemPrompt: string, messages: ClineStorageMessage[], tools?: OpenAITool[]): ApiStream {
 		const client = this.ensureClient()
 		const modelId = this.getModel().id
 		const modelInfo = this.getModel().info
@@ -58,15 +61,18 @@ export class VercelAIGatewayHandler implements ApiHandler {
 				systemPrompt,
 				messages,
 				{ id: modelId, info: modelInfo },
+				this.options.reasoningEffort,
 				this.options.thinkingBudgetTokens,
 				tools,
+				this.options.geminiThinkingLevel,
 			)
 			let didOutputUsage: boolean = false
 
 			const toolCallProcessor = new ToolCallProcessor()
 
 			for await (const chunk of stream) {
-				const delta = chunk.choices[0]?.delta
+				const delta = chunk.choices?.[0]?.delta
+
 				if (delta?.content) {
 					yield {
 						type: "text",
@@ -79,11 +85,11 @@ export class VercelAIGatewayHandler implements ApiHandler {
 				}
 
 				// Reasoning tokens are returned separately from the content
-				if ("reasoning" in delta && delta.reasoning) {
+				// Skip reasoning content for models that don't support it (e.g., devstral, grok-4)
+				if ("reasoning" in delta && delta.reasoning && !shouldSkipReasoningForModel(this.options.openRouterModelId)) {
 					yield {
 						type: "reasoning",
-						// @ts-ignore-next-line
-						reasoning: delta.reasoning,
+						reasoning: typeof delta.reasoning === "string" ? delta.reasoning : JSON.stringify(delta.reasoning),
 					}
 				}
 
@@ -92,31 +98,27 @@ export class VercelAIGatewayHandler implements ApiHandler {
 					"reasoning_details" in delta &&
 					delta.reasoning_details &&
 					// @ts-ignore-next-line
-					delta.reasoning_details.length // exists and non-0
+					delta.reasoning_details.length && // exists and non-0
+					!shouldSkipReasoningForModel(this.options.openRouterModelId)
 				) {
 					yield {
-						type: "reasoning_details",
-						reasoning_details: delta.reasoning_details,
+						type: "reasoning",
+						reasoning: "",
+						details: delta.reasoning_details,
 					}
 				}
 
 				if (!didOutputUsage && chunk.usage) {
-					const inputTokens = chunk.usage.prompt_tokens || 0
-					const outputTokens =
-						(chunk.usage.completion_tokens || 0) + (chunk.usage.completion_tokens_details?.reasoning_tokens || 0)
-
-					const cacheReadTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0
 					// @ts-ignore - Vercel AI Gateway extends OpenAI types
-					const cacheWriteTokens = chunk.usage.cache_creation_input_tokens || 0
+					const totalCost = (chunk.usage.cost || 0) + (chunk.usage.cost_details?.upstream_inference_cost || 0)
 
 					yield {
 						type: "usage",
-						inputTokens: inputTokens,
-						outputTokens: outputTokens,
-						cacheWriteTokens: cacheWriteTokens,
-						cacheReadTokens: cacheReadTokens,
-						// @ts-expect-error - Vercel AI Gateway extends OpenAI types
-						totalCost: chunk.usage.cost || 0,
+						cacheWriteTokens: 0,
+						cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens || 0,
+						inputTokens: (chunk.usage.prompt_tokens || 0) - (chunk.usage.prompt_tokens_details?.cached_tokens || 0),
+						outputTokens: chunk.usage.completion_tokens || 0,
+						totalCost,
 					}
 					didOutputUsage = true
 				}

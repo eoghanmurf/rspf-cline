@@ -1,7 +1,7 @@
-import type { Anthropic } from "@anthropic-ai/sdk"
 import { type ModelInfo, openAiModelInfoSaneDefaults } from "@shared/api"
 import OpenAI from "openai"
 import type { ChatCompletionTool as OpenAITool } from "openai/resources/chat/completions"
+import { ClineStorageMessage } from "@/shared/messages/content"
 import { fetch } from "@/shared/net"
 import type { ApiHandler, CommonApiHandlerOptions } from "../"
 import { withRetry } from "../retry"
@@ -40,7 +40,7 @@ export class LmStudioHandler implements ApiHandler {
 	}
 
 	@withRetry({ retryAllErrors: true })
-	async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[], tools?: OpenAITool[]): ApiStream {
+	async *createMessage(systemPrompt: string, messages: ClineStorageMessage[], tools?: OpenAITool[]): ApiStream {
 		const client = this.ensureClient()
 		const openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
 			{ role: "system", content: systemPrompt },
@@ -60,7 +60,7 @@ export class LmStudioHandler implements ApiHandler {
 			const toolCallProcessor = new ToolCallProcessor()
 
 			for await (const chunk of stream) {
-				const choice = chunk.choices[0]
+				const choice = chunk.choices?.[0]
 				const delta = choice?.delta
 				if (delta?.content) {
 					yield {

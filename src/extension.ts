@@ -9,6 +9,7 @@ import { sendChatButtonClickedEvent } from "./core/controller/ui/subscribeToChat
 import { sendHistoryButtonClickedEvent } from "./core/controller/ui/subscribeToHistoryButtonClicked"
 import { sendMcpButtonClickedEvent } from "./core/controller/ui/subscribeToMcpButtonClicked"
 import { sendSettingsButtonClickedEvent } from "./core/controller/ui/subscribeToSettingsButtonClicked"
+import { sendWorktreesButtonClickedEvent } from "./core/controller/ui/subscribeToWorktreesButtonClicked"
 import { WebviewProvider } from "./core/webview"
 import { createClineAPI } from "./exports"
 import { Logger } from "./services/logging/Logger"
@@ -25,19 +26,26 @@ import { addToCline } from "./core/controller/commands/addToCline"
 import { explainWithCline } from "./core/controller/commands/explainWithCline"
 import { fixWithCline } from "./core/controller/commands/fixWithCline"
 import { improveWithCline } from "./core/controller/commands/improveWithCline"
+import { clearOnboardingModelsCache } from "./core/controller/models/getClineOnboardingModels"
 import { sendAddToInputEvent } from "./core/controller/ui/subscribeToAddToInput"
-import { sendFocusChatInputEvent } from "./core/controller/ui/subscribeToFocusChatInput"
+import { sendShowWebviewEvent } from "./core/controller/ui/subscribeToShowWebview"
 import { HookDiscoveryCache } from "./core/hooks/HookDiscoveryCache"
 import { HookProcessRegistry } from "./core/hooks/HookProcessRegistry"
 import { workspaceResolver } from "./core/workspace"
-import { focusChatInput, getContextForCommand } from "./hosts/vscode/commandUtils"
-import { abortCommitGeneration, generateCommitMessage } from "./hosts/vscode/commit-message-generator"
+import { getContextForCommand, showWebview } from "./hosts/vscode/commandUtils"
+import { abortCommitGeneration, generateCommitMsg } from "./hosts/vscode/commit-message-generator"
+import {
+	disposeVscodeCommentReviewController,
+	getVscodeCommentReviewController,
+} from "./hosts/vscode/review/VscodeCommentReviewController"
+import { VscodeTerminalManager } from "./hosts/vscode/terminal/VscodeTerminalManager"
 import { VscodeDiffViewProvider } from "./hosts/vscode/VscodeDiffViewProvider"
 import { VscodeWebviewProvider } from "./hosts/vscode/VscodeWebviewProvider"
 import { ExtensionRegistryInfo } from "./registry"
 import { AuthService } from "./services/auth/AuthService"
 import { LogoutReason } from "./services/auth/types"
 import { telemetryService } from "./services/telemetry"
+import { ClineTempManager } from "./services/temp"
 import { SharedUriHandler } from "./services/uri/SharedUriHandler"
 import { ShowMessageType } from "./shared/proto/host/window"
 import { fileExistsAtPath } from "./utils/fs"
@@ -80,6 +88,9 @@ export async function activate(context: vscode.ExtensionContext) {
 	)
 
 	const webview = (await initialize(context)) as VscodeWebviewProvider
+
+	// Clean up old temp files in background (non-blocking) and start periodic cleanup every 24 hours
+	ClineTempManager.startPeriodicCleanup()
 
 	Logger.log("Cline extension activated")
 
@@ -131,6 +142,13 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand(commands.AccountButton, () => {
 			// Send event to all subscribers using the gRPC streaming method
 			sendAccountButtonClickedEvent()
+		}),
+	)
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand(commands.WorktreesButton, () => {
+			// Send event to all subscribers using the gRPC streaming method
+			sendWorktreesButtonClickedEvent()
 		}),
 	)
 
@@ -201,8 +219,8 @@ export async function activate(context: vscode.ExtensionContext) {
 					// No terminal content was copied (either nothing selected or some error)
 					return
 				}
-				// Ensure the sidebar view is visible
-				await focusChatInput()
+				// Ensure the sidebar view is visible but preserve editor focus
+				await showWebview(true)
 
 				await sendAddToInputEvent(`Terminal output:\n\`\`\`\n${terminalContents}\n\`\`\``)
 
@@ -355,19 +373,24 @@ export async function activate(context: vscode.ExtensionContext) {
 		}),
 	)
 
-	// Register the focusChatInput command handler
 	context.subscriptions.push(
-		vscode.commands.registerCommand(commands.FocusChatInput, async () => {
+		vscode.commands.registerCommand(commands.FocusChatInput, async (preserveEditorFocus: boolean = false) => {
 			const webview = WebviewProvider.getInstance() as VscodeWebviewProvider
 
 			// Show the webview
 			const webviewView = webview.getWebview()
 			if (webviewView) {
-				webviewView.show()
+				if (preserveEditorFocus) {
+					// Only make webview visible without forcing focus
+					webviewView.show(false)
+				} else {
+					// Show and force focus (default behavior for explicit focus actions)
+					webviewView.show(true)
+				}
 			}
 
-			// Send focus event
-			sendFocusChatInputEvent()
+			// Send show webview event with preserveEditorFocus flag
+			sendShowWebviewEvent(preserveEditorFocus)
 			telemetryService.captureButtonClick("command_focusChatInput", webview.controller?.task?.ulid)
 		}),
 	)
@@ -392,7 +415,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	// Register the generateGitCommitMessage command handler
 	context.subscriptions.push(
 		vscode.commands.registerCommand(commands.GenerateCommit, async (scm) => {
-			generateCommitMessage(webview.controller.stateManager, scm)
+			generateCommitMsg(webview.controller.stateManager, scm)
 		}),
 		vscode.commands.registerCommand(commands.AbortCommit, () => {
 			abortCommitGeneration()
@@ -401,7 +424,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		context.secrets.onDidChange(async (event) => {
-			if (event.key === "clineAccountId" || event.key === "cline:clineAccountId") {
+			if (event.key === "cline:clineAccountId") {
 				// Check if the secret was removed (logout) or added/updated (login)
 				const secretValue = await context.secrets.get(event.key)
 				const activeWebview = WebviewProvider.getVisibleInstance()
@@ -427,6 +450,8 @@ function setupHostProvider(context: ExtensionContext) {
 
 	const createWebview = () => new VscodeWebviewProvider(context)
 	const createDiffView = () => new VscodeDiffViewProvider()
+	const createCommentReview = () => getVscodeCommentReviewController()
+	const createTerminalManager = () => new VscodeTerminalManager()
 	const outputChannel = vscode.window.createOutputChannel("Cline")
 	context.subscriptions.push(outputChannel)
 
@@ -434,6 +459,8 @@ function setupHostProvider(context: ExtensionContext) {
 	HostProvider.initialize(
 		createWebview,
 		createDiffView,
+		createCommentReview,
+		createTerminalManager,
 		vscodeHostBridgeClient,
 		outputChannel.appendLine,
 		getCallbackUrl,
@@ -474,6 +501,9 @@ async function getBinaryLocation(name: string): Promise<string> {
 export async function deactivate() {
 	Logger.log("Cline extension deactivating, cleaning up resources...")
 
+	// Stop periodic temp file cleanup
+	ClineTempManager.stopPeriodicCleanup()
+
 	tearDown()
 
 	// Clean up test mode
@@ -484,6 +514,11 @@ export async function deactivate() {
 
 	// Clean up hook discovery cache
 	HookDiscoveryCache.getInstance().dispose()
+
+	// Clean up comment review controller
+	disposeVscodeCommentReviewController()
+
+	clearOnboardingModelsCache()
 
 	Logger.log("Cline extension deactivated")
 }
